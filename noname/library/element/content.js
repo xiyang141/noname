@@ -4098,6 +4098,12 @@ player.removeVirtualEquip(card);
 	},
 	arrangeTrigger: async function (event, trigger, player) {
 		const doingList = event.doingList.slice(0);
+		const createTrigger = async current => {
+			event.current = current;
+			await game.createTrigger(event.triggername, event.current.skill, event.current.player, trigger, event.current.indexedData);	
+			event.doing.doneList.push(event.current);
+			event.doing.todoList.remove(event.current);
+		}
 
 		while (doingList.length > 0) {
 			event.doing = doingList.shift();
@@ -4105,56 +4111,66 @@ player.removeVirtualEquip(card);
 				if (trigger.filterStop && trigger.filterStop()) {
 					return;
 				}
-				const usableSkills = event.doing.todoList.filter(info => {
-					return lib.filter.filterTrigger(trigger, info.player, event.triggername, info.skill, info.indexedData);
+				const usableSkills = event.doing.todoList.filter(i => {
+					return lib.filter.filterTrigger(trigger, i.player, event.triggername, i.skill, i.indexedData);
 				});
-				if (usableSkills.length == 0) {
+				event.doing.todoList = event.doing.todoList.filter(i => i.priority <= (usableSkills[0]?.priority ?? -Infinity));
+				if (usableSkills.length === 0) {
 					break;
-				} else {
-					event.doing.todoList = event.doing.todoList.filter(i => i.priority <= usableSkills[0].priority);
-					//firstDo时机和lastDo时机不进行技能优先级选择
-					if (get.itemtype(event.doing.player) !== "player") {
-						event.current = usableSkills[0];
-					} else {
-						event.choice = usableSkills.filter(n => n.priority == usableSkills[0].priority);
-						//现在只要找到一个同优先度技能为silent，或没有技能描述的技能 便优先执行该技能
-						const silentSkill = event.choice.find(item => {
-							const skillInfo = lib.skill[item.skill];
-							return skillInfo && (skillInfo.silent || !lib.translate[item.skill]);
-						});
-						if (silentSkill) {
-							event.current = silentSkill;
-						} else {
-							const currentChoice = event.choice[0],
-								skillsToChoose = event.choice.map(i => i.skill).unique();
-							if (event.choice.length === 1 || skillsToChoose.length === 1) {
-								event.current = currentChoice;
-							} else {
-								const currentPlayer = currentChoice.player;
-								const next = currentPlayer.chooseControl(skillsToChoose.map(skill => get.skillTranslation(skill, currentPlayer, true)));
-								next.set("prompt", "选择下一个触发的技能");
-								next.set("forceDie", true);
-								next.set("arrangeSkill", true);
-								next.set("includeOut", true);
-								const { result } = await next;
-								//千里走单骑全责，把敌人打死可能会打断chooseControl
-								if (result) {
-									event.current = usableSkills.find(info => info.skill == skillsToChoose[result.index]);
-								} else {
-									event.current = usableSkills[0];
-								}
-							}
+				}
+				
+				// firstDo时机和lastDo时机的技能不进行技能优先级选择
+				if (event.doing.player === "firstDo" || event.doing.player === "lastDo") {
+					await createTrigger(usableSkills[0]);
+					continue;
+				}
+
+				// 优先执行silent或没有技能描述的技能，不进行技能优先级选择
+				const silentSkill = usableSkills.find(item => {
+					if (item.priority !== usableSkills[0].priority) return false;
+					const skillInfo = lib.skill[item.skill];
+					return skillInfo && (skillInfo.silent || !lib.translate[item.skill]);
+				});
+				if (silentSkill) {
+					await createTrigger(silentSkill);
+					continue;
+				}
+
+				const choices = usableSkills.filter(i => i.priority === usableSkills[0].priority);
+				const skillsToChoose = choices.map(i => i.skill).unique();
+				if (choices.length === 1 || skillsToChoose.length === 1) {
+					await createTrigger(choices[0]);
+					continue;
+				}
+
+				const currentPlayer = choices[0].player;
+				const chooseSkill = async () => {
+					while (true) {
+						const next = currentPlayer.chooseControl(skillsToChoose.map(skill => get.skillTranslation(skill, currentPlayer, true)), "cancel2");
+						next.set("prompt", "选择下一个触发的技能");
+						next.set("forceDie", true);
+						next.set("arrangeSkill", true);
+						next.set("includeOut", true);
+						const { result } = await next;
+						//千里走单骑全责，把敌人打死可能会打断chooseControl
+						if (!result) {
+							continue;
 						}
+						return result;
 					}
-					event.doing.doneList.push(event.current);
-					event.doing.todoList.remove(event.current);
-					const result = await game.createTrigger(event.triggername, event.current.skill, event.current.player, trigger, event.current.indexedData).forResult();
-					if (get.itemtype(event.doing.player) === "player" && result === "cancelled") {
-						for (let i = 0; i < event.doing.todoList.length; i++) {
-							if (event.current.skill === event.doing.todoList[i].skill) {
-								event.doing.doneList.push(event.doing.todoList.splice(i--, 1)[0]);
-							}
-						}
+				}
+				const result = await chooseSkill();
+				if (result.control === "cancel2") {
+					choices.forEach(i => {
+						event.doing.doneList.push(i);
+						event.doing.todoList.remove(i);
+					});
+				} else {
+					event.current = usableSkills.find(info => info.skill === skillsToChoose[result.index]);
+					const cancelled = await game.createTrigger(event.triggername, event.current.skill, event.current.player, trigger, event.current.indexedData).forResult();
+					if (cancelled !== "cancelled") {
+						event.doing.doneList.push(event.current);
+						event.doing.todoList.remove(event.current);
 					}
 				}
 			}
